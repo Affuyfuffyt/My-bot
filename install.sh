@@ -1,11 +1,11 @@
 #!/bin/bash
 
-# 1. تحديث النظام وتجهيز البيئة
+# 1. تحديث النظام وتثبيت الأدوات الأساسية
 apt update && apt install python3-pip python3-venv curl jq ufw -y
 ufw allow 80/tcp
 ufw --force enable
 
-# 2. إيقاف التعارض مع منافذ Ubuntu 24
+# 2. حل مشكلة تعارض المنافذ في Ubuntu 24
 systemctl stop systemd-resolved
 systemctl disable systemd-resolved
 echo "nameserver 8.8.8.8" > /etc/resolv.conf
@@ -13,76 +13,118 @@ echo "nameserver 8.8.8.8" > /etc/resolv.conf
 # 3. تثبيت محرك Xray
 bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
 
-# 4. إعداد ملف Xray (VLESS WS Port 80)
+# 4. إعداد ملف Xray (VLESS WS Port 80) مع تفعيل السجلات INFO
 mkdir -p /usr/local/etc/xray
 cat <<EOF > /usr/local/etc/xray/config.json
 {
-    "log": {"loglevel": "info"},
+    "log": {
+        "loglevel": "info",
+        "access": "/var/log/xray/access.log",
+        "error": "/var/log/xray/error.log"
+    },
     "inbounds": [{
         "port": 80,
         "protocol": "vless",
-        "settings": {"clients": [], "decryption": "none"},
+        "settings": {
+            "clients": [],
+            "decryption": "none"
+        },
         "streamSettings": {
             "network": "ws",
-            "wsSettings": {"path": "/myvless"}
+            "wsSettings": {
+                "path": "/myvless"
+            }
         }
     }],
-    "outbounds": [{"protocol": "freedom"}]
+    "outbounds": [{
+        "protocol": "freedom"
+    }]
 }
 EOF
 
+# إنشاء مجلد السجلات وتصحيح الصلاحيات
+mkdir -p /var/log/xray
+touch /var/log/xray/access.log
+chmod 666 /var/log/xray/access.log
 systemctl restart xray
 
-# 5. تثبيت مكتبة التليجرام
-pip install python-telegram-bot --break-system-packages
+# 5. تثبيت مكتبة التليجرام المحدثة
+pip install python-telegram-bot --upgrade --break-system-packages
 
-# 6. طلب بيانات البوت وحفظها
+# 6. طلب بيانات البوت
 read -p "أدخل توكن البوت: " BOT_TOKEN
 read -p "أدخل الأيدي (ID): " MY_ID
 mkdir -p /etc/my-v2ray
 echo "TOKEN=\"$BOT_TOKEN\"" > /etc/my-v2ray/config.py
 echo "ADMIN_ID=$MY_ID" >> /etc/my-v2ray/config.py
 
-# 7. تحميل الكود البرمجي للبوت
+# 7. تحميل ملف البوت الأساسي (core.py)
 curl -L -o /etc/my-v2ray/core.py "https://raw.githubusercontent.com/Affuyfuffyt/My-bot/main/core.py"
 
-# 8. إنشاء سكريبت مراقبة الأجهزة (Monitor)
+# 8. إنشاء سكريبت المراقبة الديناميكي (monitor.py)
 cat <<EOF > /etc/my-v2ray/monitor.py
 import os, time, subprocess
 
-def enforce_limit():
-    while True:
-        try:
-            # فحص سجلات الاتصال لآخر 15 ثانية
-            cmd = "journalctl -u xray --since '15 seconds ago' | grep 'accepted' | tail -n 30"
-            logs = subprocess.check_output(cmd, shell=True).decode()
-            
-            user_ips = {}
-            for line in logs.split('\n'):
-                if 'email: limit_' in line:
+def get_active_sessions():
+    # جلب الـ IPs المتصلة من سجلات Xray مباشرة لآخر 10 ثوانٍ
+    cmd = "journalctl -u xray --since '10 seconds ago' | grep 'accepted' | tail -n 50"
+    try:
+        logs = subprocess.check_output(cmd, shell=True).decode()
+        active = {}
+        for line in logs.split('\n'):
+            if 'email: limit_' in line:
+                try:
                     parts = line.split('email: limit_')[1]
                     limit = int(parts.split('_')[0])
                     email = "limit_" + parts.split()[0]
                     ip = line.split('from:')[1].split(':')[0].strip()
                     
-                    if email not in user_ips: 
-                        user_ips[email] = {"limit": limit, "ips": []}
-                    if ip not in user_ips[email]["ips"]: 
-                        user_ips[email]["ips"].append(ip)
+                    if email not in active: active[email] = {"limit": limit, "ips": set()}
+                    active[email]["ips"].add(ip)
+                except: continue
+        return active
+    except: return {}
+
+def enforce_dynamic_limit():
+    blocked_ips = {} 
+    print("نظام المراقبة الديناميكي بدأ العمل...")
+    
+    while True:
+        active_users = get_active_sessions()
+        
+        # 1. فك الحظر إذا توفر مكان (الجهاز الأول خرج)
+        for email in list(blocked_ips.keys()):
+            limit = blocked_ips[email]["limit"]
+            current_ips = active_users.get(email, {"ips": set()})["ips"]
             
-            for email, data in user_ips.items():
-                if len(data["ips"]) > data["limit"]:
-                    target_ip = data["ips"][-1]
-                    os.system(f"iptables -A INPUT -s {target_ip} -j DROP")
-                    time.sleep(10)
-                    os.system(f"iptables -D INPUT -s {target_ip} -j DROP")
-        except: pass
+            if len(current_ips) < limit:
+                for ip in blocked_ips[email]["ips"]:
+                    os.system(f"iptables -D INPUT -s {ip} -j DROP")
+                print(f"✅ فك الحظر عن أجهزة المستخدم {email} لتوافر مكان.")
+                del blocked_ips[email]
+
+        # 2. حظر الأجهزة الزائدة فوراً
+        for email, data in active_users.items():
+            if len(data["ips"]) > data["limit"]:
+                all_ips = list(data["ips"])
+                to_block = all_ips[data["limit"]:]
+                
+                if email not in blocked_ips:
+                    blocked_ips[email] = {"limit": data["limit"], "ips": []}
+                
+                for ip in to_block:
+                    if ip not in blocked_ips[email]["ips"]:
+                        os.system(f"iptables -A INPUT -s {ip} -j DROP")
+                        blocked_ips[email]["ips"].append(ip)
+                        print(f"🚫 حظر IP زائد: {ip} للمستخدم {email}")
+        
         time.sleep(2)
 
-if __name__ == '__main__': enforce_limit()
+if __name__ == '__main__':
+    enforce_dynamic_limit()
 EOF
 
-# 9. إنشاء خدمات النظام
+# 9. إعداد خدمات النظام (Services)
 cat <<EOF > /etc/systemd/system/v2ray-bot.service
 [Unit]
 Description=V2Ray Bot
@@ -96,7 +138,7 @@ EOF
 
 cat <<EOF > /etc/systemd/system/v2ray-monitor.service
 [Unit]
-Description=V2Ray IP Monitor
+Description=V2Ray IP Monitor Dynamic
 After=network.target
 [Service]
 ExecStart=/usr/bin/python3 /etc/my-v2ray/monitor.py
@@ -105,9 +147,11 @@ Restart=always
 WantedBy=multi-user.target
 EOF
 
-# 10. التشغيل النهائي
+# 10. التفعيل والتشغيل
 systemctl daemon-reload
 systemctl enable v2ray-bot v2ray-monitor
 systemctl start v2ray-bot v2ray-monitor
 
-echo "✅ تم التثبيت بنجاح! البوت يعمل الآن على بورت 80 مع نظام مراقبة الأجهزة."
+echo "✅ اكتمل التثبيت بنجاح!"
+echo "📡 البوت يعمل على بورت 80."
+echo "⚖️ نظام المراقبة الديناميكي يعمل (حظر وفك حظر تلقائي)."
