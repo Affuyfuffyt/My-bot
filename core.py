@@ -1,87 +1,61 @@
-import os, subprocess, sys, json
+import os, subprocess, json, sys
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ConversationHandler, ContextTypes
 
-# ربط ملف الإعدادات
+# التحميل من config
 sys.path.append('/etc/my-v2ray')
-try:
-    from config import TOKEN, ADMIN_ID
-except ImportError:
-    print("خطأ: لم يتم العثور على ملف config.py")
-    sys.exit(1)
+from config import TOKEN, ADMIN_ID
 
-# تعريف مرحلة "انتظار الرقم"
-GET_NUM = 1
+GET_NUM, GET_QUOTA = range(2)
 
-# --- دالة البداية ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != int(ADMIN_ID): return
-    await update.message.reply_text("🚀 أهلاً بك يا مدير! أرسل /add لإنشاء كود جديد.")
+    await update.message.reply_text("🚀 أرسل /add لإنشاء كود جديد.")
 
-# --- دالة طلب الرقم (تبدأ عند /add) ---
 async def start_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != int(ADMIN_ID): return
-    await update.message.reply_text("كم جهازاً تريد السماح به؟ (أرسل رقم فقط، 0 للحظر التام)")
+    await update.message.reply_text("1️⃣ كم جهازاً تريد السماح به؟ (رقم فقط)")
     return GET_NUM
 
-# --- دالة إنشاء الكود (بعد إرسال الرقم) ---
-async def create_vless(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    limit = update.message.text
-    if not limit.isdigit():
-        await update.message.reply_text("الرجاء إرسال رقم صحيح.")
-        return GET_NUM
+async def get_num(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data['limit'] = update.message.text
+    await update.message.reply_text("2️⃣ أدخل سعة البيانات (مثال: 1G أو 500M):")
+    return GET_QUOTA
 
-    try:
-        # 1. توليد UUID وجلب IP السيرفر
-        uuid = subprocess.check_output("xray uuid", shell=True).decode().strip()
-        ip = subprocess.check_output("curl -s ifconfig.me", shell=True).decode().strip()
-        
-        # 2. فتح إعدادات Xray وإضافة المستخدم
-        config_path = "/usr/local/etc/xray/config.json"
-        with open(config_path, 'r') as f:
-            config = json.load(f)
-        
-        # تنسيق الإيميل مهم جداً للمراقب: limit_العدد_أول4حروف
-        email = f"limit_{limit}_{uuid[:4]}"
-        
-        # إضافة المستخدم للقائمة
-        config['inbounds'][0]['settings']['clients'].append({
-            "id": uuid,
-            "email": email
-        })
-        
-        # 3. حفظ الإعدادات وإعادة تشغيل Xray
-        with open(config_path, 'w') as f:
-            json.dump(config, f, indent=4)
-        
-        os.system("systemctl restart xray")
-        
-        # 4. توليد رابط الـ VLESS
-        # نستخدم بورت 80 ومسار /myvless كما هو محدد في ملف install.sh
-        link = f"vless://{uuid}@{ip}:80?path=%2Fmyvless&security=none&encryption=none&type=ws#Limit_{limit}"
-        
-        await update.message.reply_text(f"✅ تم إنشاء كود جديد!\n\n👤 المستخدم: `{email}`\n🔢 الحد: {limit} أجهزة\n\n`{link}`")
-        
-    except Exception as e:
-        await update.message.reply_text(f"❌ حدث خطأ أثناء الإضافة: {e}")
+async def create_vless(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    quota_input = update.message.text.upper()
+    limit = context.user_data['limit']
     
+    # تحويل السعة إلى Bytes
+    try:
+        num = int(''.join(filter(str.isdigit, quota_input)))
+        if "G" in quota_input: bytes_limit = num * 1024 * 1024 * 1024
+        else: bytes_limit = num * 1024 * 1024
+    except:
+        await update.message.reply_text("⚠️ خطأ في صيغة السعة. جرب 1G.")
+        return GET_QUOTA
+
+    uuid = subprocess.check_output("xray uuid", shell=True).decode().strip()
+    ip = subprocess.check_output("curl -s ifconfig.me", shell=True).decode().strip()
+    
+    # الإيميل يحمل كل المعلومات: limit_الأجهزة_max_الجيجات_uuid
+    email = f"limit_{limit}_max_{bytes_limit}_{uuid[:4]}"
+    
+    # إضافة لملف Xray
+    config_path = "/usr/local/etc/xray/config.json"
+    with open(config_path, 'r') as f:
+        config = json.load(f)
+    
+    config['inbounds'][0]['settings']['clients'].append({"id": uuid, "email": email})
+    
+    with open(config_path, 'w') as f:
+        json.dump(config, f, indent=4)
+    
+    os.system("systemctl restart xray")
+    
+    link = f"vless://{uuid}@{ip}:80?path=%2Fmyvless&security=none&encryption=none&type=ws#Limit_{limit}_{quota_input}"
+    
+    await update.message.reply_text(f"✅ تم الإنشاء!\n\n👥 الأجهزة: {limit}\n💾 السعة: {quota_input}\n\n`{link}`")
     return ConversationHandler.END
 
-if __name__ == '__main__':
-    # بناء البوت
-    app = Application.builder().token(TOKEN).build()
-
-    # إعداد نظام المحادثة (الاسم الصحيح هو ConversationHandler)
-    conv_handler = ConversationHandler(
-        entry_points=[CommandHandler("add", start_add)],
-        states={
-            GET_NUM: [MessageHandler(filters.TEXT & ~filters.COMMAND, create_vless)]
-        },
-        fallbacks=[]
-    )
-
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(conv_handler)
-    
-    print("البوت يعمل الآن ومستعد لإصدار الأكواد...")
-    app.run_polling()
+# (باقي كود الـ Application والـ Handlers كما في النسخ السابقة)
