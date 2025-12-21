@@ -3,13 +3,16 @@ from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
 sys.path.append('/etc/my-v2ray')
-from config import TOKEN, ADMIN_ID
+try:
+    from config import TOKEN, ADMIN_ID
+except ImportError:
+    sys.exit(1)
 
 CONFIG_PATH = "/usr/local/etc/xray/config.json"
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != int(ADMIN_ID): return
-    await update.message.reply_text("🚀 البوت جاهز (بورت 80)\n/add - إنشاء كود VLESS WS")
+    await update.message.reply_text("🚀 أهلاً بك! بوت الإدارة يعمل (Port 80)\n\n/add - لإنشاء كود VLESS WS جديد")
 
 async def add_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != int(ADMIN_ID): return
@@ -18,22 +21,27 @@ async def add_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
         uuid = subprocess.check_output("xray uuid", shell=True).decode().strip()
         ip = subprocess.check_output("curl -s ifconfig.me", shell=True).decode().strip()
         
+        # إضافة المستخدم للإعدادات
         with open(CONFIG_PATH, 'r') as f:
             config = json.load(f)
         
-        config['inbounds'][0]['settings']['clients'].append({"id": uuid, "email": f"u_{uuid[:4]}@bot.com"})
+        # وضع إيميل فريد ليعرفه سكريبت المراقبة
+        user_email = f"u_{uuid[:4]}@bot.com"
+        config['inbounds'][0]['settings']['clients'].append({"id": uuid, "email": user_email})
         
         with open(CONFIG_PATH, 'w') as f:
             json.dump(config, f, indent=4)
         
+        # تحديث سريع للمحرك
         os.system("systemctl restart xray")
         
-        # الرابط الجديد ببورت 80
-        link = f"vless://{uuid}@{ip}:80?path=%2Fmyvless&security=none&encryption=none&type=ws#VLESS_B80"
+        # توليد الرابط
+        link = f"vless://{uuid}@{ip}:80?path=%2Fmyvless&security=none&encryption=none&type=ws#User_{uuid[:4]}"
         
-        await update.message.reply_text(f"✅ تم الإنشاء ببورت 80:\n\n`{link}`", parse_mode='Markdown')
+        await update.message.reply_text(f"✅ تم إنشاء كود جديد:\n\n`{link}`", parse_mode='Markdown')
+        
     except Exception as e:
-        await update.message.reply_text(f"❌ خطأ: {e}")
+        await update.message.reply_text(f"❌ خطأ تقني: {e}")
 
 if __name__ == '__main__':
     app = Application.builder().token(TOKEN).build()
