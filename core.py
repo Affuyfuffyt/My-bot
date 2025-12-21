@@ -2,75 +2,64 @@ import os, subprocess, sys, json
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ConversationRouter, ContextTypes
 
-# تحميل الإعدادات (التوكن والأيدي)
+# إخبار البوت بمكان ملف الإعدادات
 sys.path.append('/etc/my-v2ray')
 from config import TOKEN, ADMIN_ID
 
-# مسار ملف إعدادات السيرفر
-CONFIG_PATH = "/usr/local/etc/xray/config.json"
+# تحديد المراحل (مرحلة سؤال الأدمن عن الرقم)
+STEP_LIMIT = 1
 
-# تعريف حالة "انتظار رقم الأجهزة"
-AWAITING_LIMIT = 1
-
-# 1. الدالة التي تعمل عند كتابة /start
+# --- 1. البداية ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != int(ADMIN_ID): return
-    await update.message.reply_text("👋 أهلاً بك يا مدير! استعمل /add لعمل كود جديد.")
+    await update.message.reply_text("👋 البوت يعمل! أرسل /add للبدء.")
 
-# 2. الدالة التي تبدأ عند كتابة /add (تطلب الرقم)
-async def ask_for_limit(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# --- 2. السؤال (عند الضغط على add) ---
+async def ask_limit(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != int(ADMIN_ID): return
-    await update.message.reply_text("كم جهازاً تريد أن يعمل على هذا الكود؟ (أرسل الرقم فقط)")
-    return AWAITING_LIMIT  # هنا البوت يدخل في "حالة انتظار"
+    await update.message.reply_text("كم عدد الأجهزة المسموح بها لهذا الكود؟")
+    return STEP_LIMIT # هنا البوت يفتح "أذنه" وينتظر الرقم
 
-# 3. الدالة التي تأخذ الرقم وتصنع الكود
-async def finish_and_create(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_limit = update.message.text
-    
-    # التأكد أن المستخدم أرسل رقماً وليس كلاماً
-    if not user_limit.isdigit():
-        await update.message.reply_text("من فضلك أرسل رقماً فقط (مثل 1 أو 2).")
-        return AWAITING_LIMIT
+# --- 3. التنفيذ (بعد إرسال الرقم) ---
+async def finish_and_send(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    number = update.message.text
+    if not number.isdigit():
+        await update.message.reply_text("أرجوك أرسل رقماً فقط!")
+        return STEP_LIMIT
 
-    # بناء الكود
+    # هنا نصنع الكود (VLESS)
     uuid = subprocess.check_output("xray uuid", shell=True).decode().strip()
     ip = subprocess.check_output("curl -s ifconfig.me", shell=True).decode().strip()
     
-    # إضافة البيانات لملف السيرفر
-    with open(CONFIG_PATH, 'r') as f:
+    # نعدل ملف الـ config الخاص بالسيرفر
+    with open("/usr/local/etc/xray/config.json", 'r') as f:
         config = json.load(f)
     
-    # نضع الرقم في خانة الإيميل (ليعرفه سكريبت المراقبة)
-    user_email = f"limit_{user_limit}_{uuid[:4]}@bot.com"
-    config['inbounds'][0]['settings']['clients'].append({"id": uuid, "email": user_email})
+    # نضع الرقم داخل الايميل ليقرأه سكريبت المراقبة لاحقاً
+    email = f"limit_{number}_{uuid[:4]}@bot.com"
+    config['inbounds'][0]['settings']['clients'].append({"id": uuid, "email": email})
     
-    with open(CONFIG_PATH, 'w') as f:
+    with open("/usr/local/etc/xray/config.json", 'w') as f:
         json.dump(config, f, indent=4)
     
-    # إعادة تشغيل السيرفر لتفعيل المستخدم الجديد
-    os.system("systemctl restart xray")
+    os.system("systemctl restart xray") # حفظ وتفعيل
     
-    # إرسال الرابط النهائي
-    link = f"vless://{uuid}@{ip}:80?path=%2Fmyvless&security=none&encryption=none&type=ws#Limit_{user_limit}"
-    await update.message.reply_text(f"✅ تم بنجاح!\nالحد الأقصى: {user_limit} أجهزة.\n\n`{link}`")
+    # صنع الرابط
+    link = f"vless://{uuid}@{ip}:80?path=%2Fmyvless&security=none&encryption=none&type=ws#Limit_{number}"
+    await update.message.reply_text(f"✅ تم! الحد: {number}\n\n`{link}`")
     
-    return ConversationRouter.END  # إنهاء المحادثة والعودة للوضع الطبيعي
+    return ConversationRouter.END # إغلاق المحادثة
 
-# تشغيل البوت
 if __name__ == '__main__':
     app = Application.builder().token(TOKEN).build()
-
-    # إعداد نظام "المحادثة"
-    conv_handler = ConversationRouter(
-        entry_points=[CommandHandler("add", ask_for_limit)],
-        states={
-            AWAITING_LIMIT: [MessageHandler(filters.TEXT & ~filters.COMMAND, finish_and_create)]
-        },
+    
+    # نظام الردود الذكي (Conversation)
+    my_conv = ConversationRouter(
+        entry_points=[CommandHandler("add", ask_limit)],
+        states={STEP_LIMIT: [MessageHandler(filters.TEXT & ~filters.COMMAND, finish_and_send)]},
         fallbacks=[]
     )
-
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(conv_handler)
     
-    print("البوت بدأ العمل...")
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(my_conv)
     app.run_polling()
