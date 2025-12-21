@@ -6,7 +6,6 @@ sys.path.append('/etc/my-v2ray')
 try:
     from config import TOKEN, ADMIN_ID
 except ImportError:
-    print("Error: Config file not found!")
     sys.exit(1)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
