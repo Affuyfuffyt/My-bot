@@ -1,13 +1,13 @@
 import os, subprocess, sys, json
 from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ConversationRouter, ContextTypes
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ConversationHandler, ContextTypes
 
 # ربط ملف الإعدادات
 sys.path.append('/etc/my-v2ray')
 try:
     from config import TOKEN, ADMIN_ID
 except ImportError:
-    print("خطأ: لم يتم العثور على ملف config.py")
+    print("Error: config.py not found")
     sys.exit(1)
 
 # تعريف مرحلة "انتظار الرقم"
@@ -21,7 +21,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # --- دالة طلب الرقم (تبدأ عند /add) ---
 async def start_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != int(ADMIN_ID): return
-    await update.message.reply_text("كم عدد الأجهزة المسموح بها لهذا الكود؟ (أرسل رقم فقط)")
+    await update.message.reply_text("كم جهازاً تريد أن يعمل على هذا الكود؟ (أرسل رقم فقط)")
     return GET_NUM
 
 # --- دالة إنشاء الكود (بعد إرسال الرقم) ---
@@ -32,11 +32,9 @@ async def create_vless(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return GET_NUM
 
     try:
-        # صنع الـ UUID والـ IP
         uuid = subprocess.check_output("xray uuid", shell=True).decode().strip()
         ip = subprocess.check_output("curl -s ifconfig.me", shell=True).decode().strip()
         
-        # إضافة المستخدم لملف Xray
         with open("/usr/local/etc/xray/config.json", 'r') as f:
             config = json.load(f)
         
@@ -48,21 +46,19 @@ async def create_vless(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         os.system("systemctl restart xray")
         
-        # إرسال الرابط
         link = f"vless://{uuid}@{ip}:80?path=%2Fmyvless&security=none&encryption=none&type=ws#Limit_{limit}"
         await update.message.reply_text(f"✅ تم إنشاء كود لـ {limit} أجهزة:\n\n`{link}`")
         
     except Exception as e:
         await update.message.reply_text(f"❌ حدث خطأ: {e}")
     
-    return ConversationRouter.END
+    return ConversationHandler.END
 
 if __name__ == '__main__':
-    # بناء البوت
     app = Application.builder().token(TOKEN).build()
 
-    # إعداد نظام المحادثة
-    conv = ConversationRouter(
+    # استخدام الاسم الصحيح: ConversationHandler
+    conv = ConversationHandler(
         entry_points=[CommandHandler("add", start_add)],
         states={GET_NUM: [MessageHandler(filters.TEXT & ~filters.COMMAND, create_vless)]},
         fallbacks=[]
@@ -71,5 +67,5 @@ if __name__ == '__main__':
     app.add_handler(CommandHandler("start", start))
     app.add_handler(conv)
     
-    print("البوت بدأ الآن...")
+    print("البوت بدأ العمل الآن...")
     app.run_polling()
