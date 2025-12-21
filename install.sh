@@ -1,7 +1,7 @@
 #!/bin/bash
 
-# 1. تحديث النظام وتثبيت الأدوات الأساسية
-apt update && apt install python3-pip python3-venv curl jq ufw -y
+# 1. تحديث النظام وتثبيت الأدوات (أضفنا net-tools لقراءة الاتصالات)
+apt update && apt install python3-pip python3-venv curl jq ufw net-tools -y
 ufw allow 80/tcp
 ufw --force enable
 
@@ -13,14 +13,12 @@ echo "nameserver 8.8.8.8" > /etc/resolv.conf
 # 3. تثبيت محرك Xray
 bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
 
-# 4. إعداد ملف Xray (VLESS WS Port 80) مع تفعيل السجلات INFO
+# 4. إعداد ملف Xray (VLESS WS Port 80) مع تفعيل السجلات INFO بدقة
 mkdir -p /usr/local/etc/xray
 cat <<EOF > /usr/local/etc/xray/config.json
 {
     "log": {
-        "loglevel": "info",
-        "access": "/var/log/xray/access.log",
-        "error": "/var/log/xray/error.log"
+        "loglevel": "info"
     },
     "inbounds": [{
         "port": 80,
@@ -42,89 +40,97 @@ cat <<EOF > /usr/local/etc/xray/config.json
 }
 EOF
 
-# إنشاء مجلد السجلات وتصحيح الصلاحيات
-mkdir -p /var/log/xray
-touch /var/log/xray/access.log
-chmod 666 /var/log/xray/access.log
 systemctl restart xray
 
-# 5. تثبيت مكتبة التليجرام المحدثة
+# 5. تثبيت مكتبة التليجرام
 pip install python-telegram-bot --upgrade --break-system-packages
 
-# 6. طلب بيانات البوت
+# 6. طلب بيانات البوت وحفظها
 read -p "أدخل توكن البوت: " BOT_TOKEN
 read -p "أدخل الأيدي (ID): " MY_ID
 mkdir -p /etc/my-v2ray
 echo "TOKEN=\"$BOT_TOKEN\"" > /etc/my-v2ray/config.py
 echo "ADMIN_ID=$MY_ID" >> /etc/my-v2ray/config.py
 
-# 7. تحميل ملف البوت الأساسي (core.py)
+# 7. تحميل كود البوت (core.py)
 curl -L -o /etc/my-v2ray/core.py "https://raw.githubusercontent.com/Affuyfuffyt/My-bot/main/core.py"
 
-# 8. إنشاء سكريبت المراقبة الديناميكي (monitor.py)
+# 8. إنشاء سكريبت المراقبة المحدث (monitor.py)
 cat <<EOF > /etc/my-v2ray/monitor.py
 import os, time, subprocess
 
-def get_active_sessions():
-    # جلب الـ IPs المتصلة من سجلات Xray مباشرة لآخر 10 ثوانٍ
-    cmd = "journalctl -u xray --since '10 seconds ago' | grep 'accepted' | tail -n 50"
+def get_realtime_connections():
+    # مراقبة بورت 80 مباشرة لرؤية كل الـ IPs المتصلة حالياً
     try:
-        logs = subprocess.check_output(cmd, shell=True).decode()
-        active = {}
-        for line in logs.split('\n'):
-            if 'email: limit_' in line:
-                try:
-                    parts = line.split('email: limit_')[1]
-                    limit = int(parts.split('_')[0])
-                    email = "limit_" + parts.split()[0]
-                    ip = line.split('from:')[1].split(':')[0].strip()
-                    
-                    if email not in active: active[email] = {"limit": limit, "ips": set()}
-                    active[email]["ips"].add(ip)
-                except: continue
-        return active
-    except: return {}
+        cmd = "netstat -tnp | grep ':80 ' | grep 'ESTABLISHED' | awk '{print \$5}' | cut -d: -f1"
+        output = subprocess.check_output(cmd, shell=True).decode()
+        return [ip.strip() for ip in output.split('\n') if ip.strip()]
+    except: return []
 
-def enforce_dynamic_limit():
-    blocked_ips = {} 
-    print("نظام المراقبة الديناميكي بدأ العمل...")
-    
+def enforce_limit():
+    print("المراقب الذكي يعمل بنظام التفتيش المباشر...")
+    blocked_ips = set() # الـ IPs المحظورة حالياً
+
     while True:
-        active_users = get_active_sessions()
+        connections = get_realtime_connections()
+        unique_active_ips = set(connections)
         
-        # 1. فك الحظر إذا توفر مكان (الجهاز الأول خرج)
-        for email in list(blocked_ips.keys()):
-            limit = blocked_ips[email]["limit"]
-            current_ips = active_users.get(email, {"ips": set()})["ips"]
+        # قراءة سجلات Xray لمعرفة أي IP يتبع لأي مستخدم والحد المسموح له
+        cmd_logs = "journalctl -u xray --since '10 seconds ago' | grep 'accepted'"
+        try:
+            logs = subprocess.check_output(cmd_logs, shell=True).decode()
+            user_data = {} # {email: {"limit": int, "ips": set()}}
             
-            if len(current_ips) < limit:
-                for ip in blocked_ips[email]["ips"]:
-                    os.system(f"iptables -D INPUT -s {ip} -j DROP")
-                print(f"✅ فك الحظر عن أجهزة المستخدم {email} لتوافر مكان.")
-                del blocked_ips[email]
+            for line in logs.split('\n'):
+                if 'email: limit_' in line:
+                    try:
+                        parts = line.split('email: limit_')[1]
+                        limit = int(parts.split('_')[0])
+                        email = "limit_" + parts.split()[0]
+                        ip = line.split('from:')[1].split(':')[0].strip()
+                        
+                        # نركز فقط على الـ IPs التي لا تزال متصلة فعلياً حسب Netstat
+                        if ip in unique_active_ips:
+                            if email not in user_data: user_data[email] = {"limit": limit, "ips": set()}
+                            user_data[email]["ips"].add(ip)
+                    except: continue
 
-        # 2. حظر الأجهزة الزائدة فوراً
-        for email, data in active_users.items():
-            if len(data["ips"]) > data["limit"]:
-                all_ips = list(data["ips"])
-                to_block = all_ips[data["limit"]:]
+            # الحظر وفك الحظر التلقائي
+            for email, data in user_data.items():
+                active_list = list(data["ips"])
+                limit = data["limit"]
+
+                # 🚫 حالة التجاوز: حظر الجهاز الزائد
+                if len(active_list) > limit:
+                    to_block = active_list[limit:] # الأجهزة التي تزيد عن الحد
+                    for tip in to_block:
+                        if tip not in blocked_ips:
+                            os.system(f"iptables -I INPUT -s {tip} -j DROP")
+                            blocked_ips.add(tip)
+                            print(f"🚫 تم حظر IP زائد: {tip} للمستخدم {email}")
+
+            # ✅ فك الحظر: إذا قل عدد الأجهزة المتصلة عن الحد
+            for b_ip in list(blocked_ips):
+                # إذا كان الـ IP المحظور لم يعد يظهر كجهاز زائد أو خرج أحد الأجهزة الأصلية
+                # نقوم بفك الحظر لتجربة الاتصال مرة أخرى
+                found_in_active = False
+                for email, data in user_data.items():
+                    if b_ip in data["ips"]: found_in_active = True
                 
-                if email not in blocked_ips:
-                    blocked_ips[email] = {"limit": data["limit"], "ips": []}
-                
-                for ip in to_block:
-                    if ip not in blocked_ips[email]["ips"]:
-                        os.system(f"iptables -A INPUT -s {ip} -j DROP")
-                        blocked_ips[email]["ips"].append(ip)
-                        print(f"🚫 حظر IP زائد: {ip} للمستخدم {email}")
-        
+                # إذا لم نجد الـ IP في حالة "تجاوز" حالية، نفك حظره
+                if not found_in_active or any(len(d["ips"]) <= d["limit"] for d in user_data.values()):
+                    os.system(f"iptables -D INPUT -s {b_ip} -j DROP")
+                    blocked_ips.discard(b_ip)
+                    print(f"✅ فك الحظر عن: {b_ip} لتوافر مكان.")
+
+        except: pass
         time.sleep(2)
 
 if __name__ == '__main__':
-    enforce_dynamic_limit()
+    enforce_limit()
 EOF
 
-# 9. إعداد خدمات النظام (Services)
+# 9. إنشاء خدمات النظام
 cat <<EOF > /etc/systemd/system/v2ray-bot.service
 [Unit]
 Description=V2Ray Bot
@@ -147,11 +153,11 @@ Restart=always
 WantedBy=multi-user.target
 EOF
 
-# 10. التفعيل والتشغيل
+# 10. التشغيل النهائي وتنظيف قواعد الجدار الناري القديمة
+iptables -F
 systemctl daemon-reload
 systemctl enable v2ray-bot v2ray-monitor
 systemctl start v2ray-bot v2ray-monitor
 
-echo "✅ اكتمل التثبيت بنجاح!"
-echo "📡 البوت يعمل على بورت 80."
-echo "⚖️ نظام المراقبة الديناميكي يعمل (حظر وفك حظر تلقائي)."
+echo "✅ تم التحديث بنجاح!"
+echo "📡 نظام المراقبة الجديد يراقب بورت 80 مباشرة."
