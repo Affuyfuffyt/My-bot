@@ -28,40 +28,35 @@ def ensure_inbound(protocol, port):
     config = load_json(FILES['xray'])
     port = int(port)
     
-    # هل البورت موجود مسبقاً؟
+    # التحقق هل البورت موجود
     for inbound in config['inbounds']:
         if inbound.get('port') == port:
             if inbound['protocol'] != protocol:
-                return False # خطأ: البورت مشغول ببروتوكول آخر
+                return False # البورت مشغول ببروتوكول آخر
             return True # البورت موجود وجاهز
             
-    # إذا لم يكن موجوداً، قم بإنشائه
+    # إنشاء Inbound جديد إذا لم يكن موجوداً
     new_inbound = {
         "port": port,
         "protocol": protocol,
         "settings": {
             "clients": [] if protocol != "shadowsocks" else [],
-            "users": [] if protocol == "shadowsocks" else [], # الشادوسوكس يستخدم users
+            "users": [] if protocol == "shadowsocks" else [],
             "decryption": "none"
         },
         "streamSettings": {
             "network": "ws",
-            "wsSettings": {"path": "/"} # مسار افتراضي يمكن تعديله
+            "wsSettings": {"path": "/"}
         }
     }
     
-    # تعديلات خاصة لكل بروتوكول
     if protocol == "shadowsocks":
         new_inbound["settings"] = {
-            "method": "chacha20-ietf-poly1305", # تشفير قوي وحديث
+            "method": "chacha20-ietf-poly1305",
             "users": [],
             "network": "tcp,udp"
         }
-        del new_inbound["streamSettings"] # الشادوسوكس غالباً TCP صافي
-    elif protocol == "trojan":
-        # تروجان يحتاج شهادة، سنجعله يعمل بدون TLS للتبسيط أو يحتاج إعدادات إضافية
-        # سنستخدم Fallback بسيط هنا لغرض البوت
-        pass 
+        del new_inbound["streamSettings"]
 
     config['inbounds'].append(new_inbound)
     save_json(FILES['xray'], config)
@@ -96,6 +91,8 @@ async def get_desc(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def get_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['media'] = update.message.photo[-1].file_id if update.message.photo else None
+    if update.message.video: context.user_data['media'] = update.message.video.file_id
+    
     kb = [["vless", "vmess"], ["trojan", "shadowsocks"]]
     await update.message.reply_text("4️⃣ اختر البروتوكول:", reply_markup=ReplyKeyboardMarkup(kb, one_time_keyboard=True))
     return PROTOCOL
@@ -111,7 +108,6 @@ async def get_port(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ يجب أن يكون رقماً.")
         return PORT
     
-    # محاولة تجهيز البورت في السيرفر
     proto = context.user_data['p_proto']
     if ensure_inbound(proto, port):
         context.user_data['p_port'] = port
@@ -179,7 +175,6 @@ async def process_buy(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await query.answer("جاري التجهيز...")
     
-    # تجهيز القيم
     try:
         # تحويل السعة والوقت
         q_str = prod['quota'].upper()
@@ -199,16 +194,16 @@ async def process_buy(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 break
         
         if not target_inbound:
-            await query.message.reply_text("❌ خطأ: البورت غير موجود في السيرفر.")
+            await query.message.reply_text("❌ خطأ: البورت غير موجود.")
             return
 
         user_uuid = str(uuid.uuid4())
         email = f"limit_{prod['limit']}_max_{max_bytes}_exp_{exp_time}_{user_uuid[:5]}"
         ip = subprocess.check_output("curl -s ifconfig.me", shell=True).decode().strip()
 
-        # إضافة حسب البروتوكول
+        # توليد الرابط حسب البروتوكول
+        link = ""
         if prod['proto'] == "shadowsocks":
-            # في شادوسوكس نستخدم password بدلاً من id
             client_entry = {"password": user_uuid, "email": email}
             if 'users' not in target_inbound['settings']: target_inbound['settings']['users'] = []
             target_inbound['settings']['users'].append(client_entry)
@@ -222,7 +217,6 @@ async def process_buy(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if prod['proto'] == "vless":
                 link = f"vless://{user_uuid}@{ip}:{prod['port']}?type={type_q}&path=/&security=none#{prod['name']}"
             elif prod['proto'] == "vmess":
-                # رابط VMess يحتاج JSON وتشفير Base64 (تبسيط للكود)
                 vmess_json = {"v": "2","ps": prod['name'],"add": ip,"port": prod['port'],"id": user_uuid,"aid": "0","net": type_q,"type": "none","host": "","path": "/","tls": ""}
                 link = "vmess://" + subprocess.getoutput(f"echo '{json.dumps(vmess_json)}' | base64 -w 0")
             elif prod['proto'] == "trojan":
@@ -236,7 +230,7 @@ async def process_buy(update: Update, context: ContextTypes.DEFAULT_TYPE):
         users[uid]["points"] -= prod['price']
         save_json(FILES['users'], users)
         
-        await query.message.reply_text(f"✅ تم!\nالرصيد المتبقي: {users[uid]['points']}\n\n`{link}`", parse_mode='Markdown')
+        await query.message.reply_text(f"✅ تم!\n`{link}`", parse_mode='Markdown')
 
     except Exception as e:
         await query.message.reply_text(f"خطأ: {e}")
@@ -244,31 +238,32 @@ async def process_buy(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # --- إدارة المستخدمين (إضافة نقاط) ---
 async def manage_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != int(ADMIN_ID): return
-    await update.message.reply_text("👤 أرسل ID المستخدم الذي تريد تعديل نقاطه:")
+    await update.message.reply_text("👤 أرسل ID المستخدم لتعديل نقاطه:")
     return ADMIN_USER_ID
 
 async def get_admin_uid(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['target_uid'] = update.message.text
-    await update.message.reply_text("💰 كم النقاط التي تريد إضافتها؟ (اكتب رقم سالب للخصم):")
+    await update.message.reply_text("💰 كم النقاط؟ (رقم سالب للخصم):")
     return ADMIN_POINTS
 
 async def get_admin_points(update: Update, context: ContextTypes.DEFAULT_TYPE):
     points = int(update.message.text)
     uid = context.user_data['target_uid']
     users = load_json(FILES['users'])
-    
     if uid not in users: users[uid] = {"points": 0}
     users[uid]["points"] += points
     save_json(FILES['users'], users)
-    
-    await update.message.reply_text(f"✅ تم تحديث رصيد {uid}. الرصيد الحالي: {users[uid]['points']}")
+    await update.message.reply_text(f"✅ تم التحديث. الرصيد الجديد: {users[uid]['points']}")
+    return ConversationHandler.END
+
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("❌ إلغاء", reply_markup=ReplyKeyboardMarkup([["🛒 المنتجات"]], resize_keyboard=True))
     return ConversationHandler.END
 
 # --- التشغيل ---
 if __name__ == '__main__':
     app = Application.builder().token(TOKEN).build()
     
-    # معالجات المحادثة
     prod_handler = ConversationHandler(
         entry_points=[MessageHandler(filters.Regex("^➕ منتج جديد"), add_prod_start)],
         states={
@@ -281,7 +276,7 @@ if __name__ == '__main__':
             QUOTA: [MessageHandler(filters.TEXT, get_quota)],
             DURATION: [MessageHandler(filters.TEXT, get_duration)],
             PRICE: [MessageHandler(filters.TEXT, get_price)],
-        }, fallbacks=[]
+        }, fallbacks=[MessageHandler(filters.Regex("^🔙"), cancel)]
     )
     
     points_handler = ConversationHandler(
@@ -289,7 +284,7 @@ if __name__ == '__main__':
         states={
             ADMIN_USER_ID: [MessageHandler(filters.TEXT, get_admin_uid)],
             ADMIN_POINTS: [MessageHandler(filters.TEXT, get_admin_points)]
-        }, fallbacks=[]
+        }, fallbacks=[MessageHandler(filters.Regex("^🔙"), cancel)]
     )
 
     app.add_handler(CommandHandler("start", start))
