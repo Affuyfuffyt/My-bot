@@ -9,7 +9,7 @@ except: sys.exit("Config missing")
 
 FILES = {"prods": "/etc/my-v2ray/products.json", "users": "/etc/my-v2ray/users.json", "xray": "/usr/local/etc/xray/config.json"}
 
-# مراحل المحادثة (تمت إضافة مراحل جديدة)
+# مراحل المحادثة
 (NAME, DESC, MEDIA, PROTOCOL, PORT, ADDRESS_CHOICE, ADDRESS_INPUT, UUID_CHOICE, UUID_INPUT, PATH_CHOICE, PATH_INPUT, HOST_CHOICE, HOST_INPUT, SNI_CHOICE, SNI_INPUT, LIMIT, QUOTA, DURATION, PRICE, ADMIN_USER, ADMIN_POINTS) = range(21)
 
 # --- دوال مساعدة ---
@@ -26,61 +26,62 @@ def restart_xray():
 def random_path(length=6):
     return "/" + ''.join(random.choices(string.ascii_lowercase + string.digits, k=length))
 
-# --- إنشاء Inbound ذكي (WS للكل) ---
-def ensure_inbound(protocol, port, path):
+# --- التعامل مع Xray ---
+def ensure_inbound(protocol, port):
+    """
+    هذه الدالة تتأكد فقط من أن البورت مفتوح.
+    إذا كان مفتوحاً مسبقاً بنفس البروتوكول، تسمح باستخدامه (ميزة تعدد المنتجات).
+    """
     config = load_json(FILES['xray'])
     port = int(port)
     
-    # البحث عن البورت
+    # التحقق هل البورت موجود
     for ib in config['inbounds']:
         if ib.get('port') == port:
-            # إذا البورت موجود، يجب التأكد من تطابق البروتوكول والمسار
-            current_path = ib.get('streamSettings', {}).get('wsSettings', {}).get('path', '/')
-            if ib['protocol'] != protocol: return False, "❌ البورت مشغول ببروتوكول آخر."
-            if current_path != path: return False, f"❌ البورت مشغول بمسار مختلف ({current_path})."
-            return True, "✅ تم استخدام البورت الموجود."
+            # البورت موجود.. هل هو نفس البروتوكول؟
+            if ib['protocol'] == protocol:
+                return True, "✅ البورت مفتوح مسبقاً بنفس البروتوكول، سيتم إضافة المنتج عليه."
+            else:
+                return False, f"❌ خطأ: البورت {port} مشغول ببروتوكول آخر ({ib['protocol']})."
 
-    # إعدادات WS الموحدة (تعمل مع SS, Trojan, Vless, Vmess)
-    stream = {
+    # إذا البورت غير موجود، نقوم بإنشائه بوضع Websocket افتراضي
+    stream_settings = {
         "network": "ws",
-        "wsSettings": { "path": path }
+        "wsSettings": { "path": "/" } # المسار سيتغير لكل مستخدم لاحقاً أو يتم تجاهله هنا
     }
     
-    settings = {"clients": [], "decryption": "none"}
-    
+    settings = {}
     if protocol == "shadowsocks":
-        # في SS نستخدم password وميثود
         settings = {
             "method": "chacha20-ietf-poly1305",
             "users": [],
             "network": "tcp,udp"
         }
-    elif protocol == "trojan":
-        # تروجان عادة يطلب TLS لكن سنشغله WS صافي (خلف CDN أو مباشر)
-        settings = {"clients": []}
+    elif protocol in ["vless", "vmess", "trojan"]:
+        settings = {"clients": [], "decryption": "none"}
 
     new_inbound = {
         "port": port,
         "protocol": protocol,
         "settings": settings,
-        "streamSettings": stream,
-        "tag": f"{protocol}_{port}"
+        "streamSettings": stream_settings,
+        "tag": f"tag_{port}_{protocol}" # تاج مميز
     }
     
     config['inbounds'].append(new_inbound)
     save_json(FILES['xray'], config)
-    return True, "✅ تم فتح بورت جديد."
+    return True, "✅ تم فتح بورت جديد في السيرفر."
 
 # --- البداية ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id == int(ADMIN_ID):
-        kb = [["🛒 المنتجات", "👥 إدارة المستخدمين"], ["➕ منتج جديد", "⚙️ تحديث"]]
-        await update.message.reply_text("👮‍♂️ أهلاً بالمدير:", reply_markup=ReplyKeyboardMarkup(kb, resize_keyboard=True))
+        kb = [["🛒 المنتجات", "👥 إدارة المستخدمين"], ["➕ منتج جديد", "⚙️ تحديث السيرفر"]]
+        await update.message.reply_text("👮‍♂️ لوحة التحكم:", reply_markup=ReplyKeyboardMarkup(kb, resize_keyboard=True))
     else:
         kb = [["🛍️ شراء كود", "💰 رصيدي"], ["🆘 دعم فني"]]
         await update.message.reply_text("👋 أهلاً بك في المتجر:", reply_markup=ReplyKeyboardMarkup(kb, resize_keyboard=True))
 
-# --- إضافة منتج (الخطوات الجديدة) ---
+# --- إضافة منتج ---
 async def add_prod_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != int(ADMIN_ID): return ConversationHandler.END
     await update.message.reply_text("1️⃣ اسم المنتج:", reply_markup=ReplyKeyboardMarkup([["🔙 إلغاء"]], resize_keyboard=True))
@@ -94,7 +95,7 @@ async def get_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def get_desc(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['p_desc'] = update.message.text
-    await update.message.reply_text("3️⃣ ميديا (صورة/فيديو) أو اكتب 'تخطي':")
+    await update.message.reply_text("3️⃣ ميديا (صورة/فيديو) أو 'تخطي':")
     return MEDIA
 
 async def get_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -102,31 +103,36 @@ async def get_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.video: context.user_data['media'] = update.message.video.file_id
     
     kb = [["vless", "vmess"], ["trojan", "shadowsocks"]]
-    await update.message.reply_text("4️⃣ اختر البروتوكول (الكل سيكون WS):", reply_markup=ReplyKeyboardMarkup(kb, one_time_keyboard=True))
+    await update.message.reply_text("4️⃣ اختر البروتوكول (الكل WS):", reply_markup=ReplyKeyboardMarkup(kb, one_time_keyboard=True))
     return PROTOCOL
 
 async def get_protocol(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['p_proto'] = update.message.text
-    await update.message.reply_text("5️⃣ رقم البورت (مثال: 80, 2053, 443):")
+    await update.message.reply_text("5️⃣ رقم البورت (يمكن تكراره لنفس البروتوكول):")
     return PORT
 
 async def get_port(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message.text.isdigit(): return PORT
-    context.user_data['p_port'] = update.message.text
+    port = update.message.text
+    proto = context.user_data['p_proto']
     
-    # --- اختيار العنوان (IP) ---
-    kb = [["📍 تلقائي (IP السيرفر)"], ["✏️ يدوي (دومين/CDN)"]]
-    await update.message.reply_text("6️⃣ عنوان الاتصال (Address):", reply_markup=ReplyKeyboardMarkup(kb, resize_keyboard=True))
+    # التحقق من إمكانية استخدام البورت
+    ok, msg = ensure_inbound(proto, port)
+    if not ok:
+        await update.message.reply_text(msg)
+        return PORT # إعادة السؤال
+        
+    context.user_data['p_port'] = port
+    await update.message.reply_text(f"{msg}\n\n6️⃣ عنوان الاتصال (IP/Domain):", 
+                                    reply_markup=ReplyKeyboardMarkup([["📍 تلقائي"], ["✏️ يدوي"]], resize_keyboard=True))
     return ADDRESS_CHOICE
 
 async def get_address_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    choice = update.message.text
-    if "تلقائي" in choice:
+    if "تلقائي" in update.message.text:
         context.user_data['p_addr'] = "AUTO"
-        # ننتقل للخطوة التالية مباشرة
         return await ask_uuid(update, context)
     else:
-        await update.message.reply_text("اكتب العنوان (مثال: my.domain.com):")
+        await update.message.reply_text("اكتب الدومين/IP:")
         return ADDRESS_INPUT
 
 async def get_address_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -134,8 +140,8 @@ async def get_address_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return await ask_uuid(update, context)
 
 async def ask_uuid(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    kb = [["🎲 عشوائي (لكل مشتري)"], ["✏️ يدوي (ثابت للكل)"]]
-    await update.message.reply_text("7️⃣ نظام الـ UUID/Password:", reply_markup=ReplyKeyboardMarkup(kb, resize_keyboard=True))
+    kb = [["🎲 عشوائي (لكل زبون كود مختلف)"], ["✏️ يدوي (كود ثابت للجميع)"]]
+    await update.message.reply_text("7️⃣ نظام UUID/Password:", reply_markup=ReplyKeyboardMarkup(kb, resize_keyboard=True))
     return UUID_CHOICE
 
 async def get_uuid_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -143,7 +149,7 @@ async def get_uuid_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data['p_uuid'] = "RANDOM"
         return await ask_path(update, context)
     else:
-        await update.message.reply_text("اكتب الـ UUID/Password الثابت:")
+        await update.message.reply_text("اكتب الكود/الباسورد الثابت:")
         return UUID_INPUT
 
 async def get_uuid_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -152,7 +158,7 @@ async def get_uuid_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def ask_path(update: Update, context: ContextTypes.DEFAULT_TYPE):
     kb = [["🎲 مسار عشوائي"], ["✏️ مسار يدوي"]]
-    await update.message.reply_text("8️⃣ المسار (Path) للـ WebSocket:", reply_markup=ReplyKeyboardMarkup(kb, resize_keyboard=True))
+    await update.message.reply_text("8️⃣ المسار (Path):", reply_markup=ReplyKeyboardMarkup(kb, resize_keyboard=True))
     return PATH_CHOICE
 
 async def get_path_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -160,36 +166,24 @@ async def get_path_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data['p_path'] = random_path()
         return await ask_host(update, context)
     else:
-        await update.message.reply_text("اكتب المسار (يجب أن يبدأ بـ / مثال: /myspeed):")
+        await update.message.reply_text("اكتب المسار (مثال /speed):")
         return PATH_INPUT
 
 async def get_path_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    path = update.message.text
-    if not path.startswith("/"): path = "/" + path
-    context.user_data['p_path'] = path
+    context.user_data['p_path'] = update.message.text
     return await ask_host(update, context)
 
 async def ask_host(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # تجهيز البورت في السيرفر الآن لأننا نملك المسار
-    proto = context.user_data['p_proto']
-    port = context.user_data['p_port']
-    path = context.user_data['p_path']
-    
-    success, msg = ensure_inbound(proto, port, path)
-    if not success:
-        await update.message.reply_text(msg + "\nأعد المحاولة بمسار أو بورت مختلف.", reply_markup=ReplyKeyboardMarkup([["🔙 إلغاء"]]))
-        return ConversationHandler.END
-    
-    kb = [["❌ بدون Host"], ["✏️ كتابة Host"]]
-    await update.message.reply_text(f"{msg}\n9️⃣ إعدادات الـ Host:", reply_markup=ReplyKeyboardMarkup(kb, resize_keyboard=True))
+    kb = [["❌ فارغ"], ["✏️ كتابة Host"]]
+    await update.message.reply_text("9️⃣ إعدادات Host:", reply_markup=ReplyKeyboardMarkup(kb, resize_keyboard=True))
     return HOST_CHOICE
 
 async def get_host_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if "بدون" in update.message.text:
+    if "فارغ" in update.message.text:
         context.user_data['p_host'] = ""
         return await ask_sni(update, context)
     else:
-        await update.message.reply_text("اكتب الـ Host:")
+        await update.message.reply_text("اكتب Host:")
         return HOST_INPUT
 
 async def get_host_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -197,7 +191,6 @@ async def get_host_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return await ask_sni(update, context)
 
 async def ask_sni(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # الـ SNI يظهر فقط لبورت 443
     if context.user_data['p_port'] == "443":
         kb = [["❌ فارغ"], ["✏️ كتابة SNI"]]
         await update.message.reply_text("🔟 إعدادات SNI (لأن البورت 443):", reply_markup=ReplyKeyboardMarkup(kb, resize_keyboard=True))
@@ -211,7 +204,7 @@ async def get_sni_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data['p_sni'] = ""
         return await ask_limit(update, context)
     else:
-        await update.message.reply_text("اكتب الـ SNI:")
+        await update.message.reply_text("اكتب SNI:")
         return SNI_INPUT
 
 async def get_sni_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -219,12 +212,12 @@ async def get_sni_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return await ask_limit(update, context)
 
 async def ask_limit(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("1️⃣1️⃣ عدد الأجهزة المسموحة:")
+    await update.message.reply_text("1️⃣1️⃣ عدد الأجهزة:")
     return LIMIT
 
 async def get_limit(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['p_limit'] = update.message.text
-    await update.message.reply_text("1️⃣2️⃣ السعة (مثال 50G):")
+    await update.message.reply_text("1️⃣2️⃣ السعة (مثال 10G):")
     return QUOTA
 
 async def get_quota(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -243,7 +236,6 @@ async def get_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     products = load_json(FILES['prods'])
     pid = str(uuid.uuid4())[:6]
     
-    # حفظ المنتج بكامل تفاصيله الجديدة
     products[pid] = {
         "name": data['p_name'], "desc": data['p_desc'], "media": data['media'],
         "proto": data['p_proto'], "port": data['p_port'], 
@@ -253,20 +245,16 @@ async def get_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "price": price
     }
     save_json(FILES['prods'], products)
-    restart_xray() # لتفعيل البورت والمسار
     
-    await update.message.reply_text("✅ تم إضافة المنتج المتطور!", reply_markup=ReplyKeyboardMarkup([["🛒 المنتجات"]], resize_keyboard=True))
+    # ملاحظة: لا نحتاج لعمل ريستارت هنا لأننا لم نعدل الكونفق، فقط حفظنا المنتج
+    # سيتم التعديل الحقيقي عند الشراء أو إذا أنشأنا بورت جديد في ensure_inbound
+    if "مفتوح مسبقاً" not in ensure_inbound(data['p_proto'], data['p_port'])[1]:
+        restart_xray()
+
+    await update.message.reply_text("✅ تم الحفظ!", reply_markup=ReplyKeyboardMarkup([["🛒 المنتجات"]], resize_keyboard=True))
     return ConversationHandler.END
 
-# --- الشراء ---
-async def show_shop(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    products = load_json(FILES['prods'])
-    kb = []
-    for pid, p in products.items():
-        kb.append([InlineKeyboardButton(f"{p['name']} | {p['price']}💰", callback_data=f"buy_{pid}")])
-    if not kb: await update.message.reply_text("فارغ.")
-    else: await update.message.reply_text("اختر:", reply_markup=InlineKeyboardMarkup(kb))
-
+# --- عملية الشراء (إصلاحات هامة هنا) ---
 async def process_buy(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     pid = query.data.split("_")[1]
@@ -275,12 +263,14 @@ async def process_buy(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = str(query.from_user.id)
     users = load_json(FILES['users'])
     
+    # 1. فحص الرصيد
     if users.get(uid, {}).get("points", 0) < prod['price']:
-        await query.answer("❌ رصيدك لا يكفي!", show_alert=True); return
+        await query.answer("❌ رصيدك لا يكفي!", show_alert=True)
+        return
     
-    await query.answer("جاري التجهيز...")
+    await query.answer("⏳ جاري التجهيز...")
     try:
-        # حساب السعة والوقت
+        # 2. حساب القيم
         q_str = prod['quota'].upper()
         size = int(''.join(filter(str.isdigit, q_str)))
         max_b = size * (1024**3 if "G" in q_str else 1024**2)
@@ -289,89 +279,105 @@ async def process_buy(update: Update, context: ContextTypes.DEFAULT_TYPE):
         t_val = int(''.join(filter(str.isdigit, t_str)))
         exp_t = int(time.time()) + (t_val * 86400 if "d" in t_str else t_val * 3600)
         
-        # تحديد الـ UUID/Password
-        if prod['uuid_mode'] == "RANDOM":
-            user_id = str(uuid.uuid4())
-        else:
-            user_id = prod['uuid_mode'] # يدوي ثابت
-            
-        email = f"limit_{prod['limit']}_max_{max_b}_exp_{exp_t}_{user_id[:5]}"
+        # 3. تجهيز UUID/Password
+        user_uuid = prod['uuid_mode'] if prod['uuid_mode'] != "RANDOM" else str(uuid.uuid4())
+        email = f"limit_{prod['limit']}_max_{max_b}_exp_{exp_t}_{user_uuid[:5]}"
         
-        # تحديد العنوان IP
-        address = prod['addr']
-        if address == "AUTO":
-            address = subprocess.check_output("curl -s ifconfig.me", shell=True).decode().strip()
-            
-        # إضافة للسيرفر
+        # 4. التعديل على ملف Config (إضافة المستخدم)
         config = load_json(FILES['xray'])
-        target_ib = None
-        for ib in config['inbounds']:
-            if str(ib['port']) == str(prod['port']) and ib['protocol'] == prod['proto']:
-                target_ib = ib; break
+        target_inbound = None
         
-        if not target_ib: await query.message.reply_text("خطأ: البورت غير موجود"); return
+        # البحث عن البورت الصحيح
+        for inbound in config['inbounds']:
+            if str(inbound.get('port')) == str(prod['port']) and inbound['protocol'] == prod['proto']:
+                target_inbound = inbound
+                break
+        
+        if not target_inbound:
+            await query.message.reply_text("❌ خطأ فادح: البورت غير موجود في إعدادات السيرفر.")
+            return
 
-        # بناء الرابط وإضافة المستخدم
+        # إضافة العميل حسب البروتوكول
+        if prod['proto'] == "shadowsocks":
+            if 'users' not in target_inbound['settings']: target_inbound['settings']['users'] = []
+            
+            # منع التكرار إذا كان UUID ثابت
+            exists = any(u['password'] == user_uuid for u in target_inbound['settings']['users'])
+            if not exists:
+                target_inbound['settings']['users'].append({"password": user_uuid, "email": email, "method": "chacha20-ietf-poly1305"})
+
+        else: # vless, vmess, trojan
+            if 'clients' not in target_inbound['settings']: target_inbound['settings']['clients'] = []
+            
+            exists = any(c.get('id') == user_uuid or c.get('password') == user_uuid for c in target_inbound['settings']['clients'])
+            if not exists:
+                key = "password" if prod['proto'] == "trojan" else "id"
+                target_inbound['settings']['clients'].append({key: user_uuid, "email": email})
+
+        save_json(FILES['xray'], config)
+        restart_xray() # مهم جداً لتفعيل المستخدم
+
+        # 5. خصم الرصيد
+        if uid not in users: users[uid] = {"points": 0}
+        users[uid]["points"] -= prod['price']
+        save_json(FILES['users'], users)
+
+        # 6. توليد الرابط
+        addr = prod['addr']
+        if addr == "AUTO": addr = subprocess.check_output("curl -s ifconfig.me", shell=True).decode().strip()
+        
         link = ""
         path = prod['path']
         host = prod['host']
         sni = prod['sni']
         
-        if prod['proto'] == "shadowsocks":
-            # SS + WS
-            entry = {"password": user_id, "email": email}
-            # منع التكرار إذا كان ثابت
-            exists = False
-            for u in target_ib['settings'].get('users', []):
-                if u['password'] == user_id: exists = True; break
-            if not exists: 
-                if 'users' not in target_ib['settings']: target_ib['settings']['users'] = []
-                target_ib['settings']['users'].append(entry)
+        if prod['proto'] == "vless":
+            link = f"vless://{user_uuid}@{addr}:{prod['port']}?type=ws&path={path}&security=none&host={host}&sni={sni}#{prod['name']}"
+        
+        elif prod['proto'] == "vmess":
+            v_json = {
+                "v": "2", "ps": prod['name'], "add": addr, "port": prod['port'], "id": user_uuid,
+                "aid": "0", "net": "ws", "type": "none", "host": host, "path": path, 
+                "tls": "none" if prod['port']!="443" else "tls", "sni": sni
+            }
+            link = "vmess://" + subprocess.getoutput(f"echo '{json.dumps(v_json)}' | base64 -w 0")
+        
+        elif prod['proto'] == "trojan":
+            # تروجان WS بدون TLS هو الحل الأفضل للتوافق بدون شهادة
+            link = f"trojan://{user_uuid}@{addr}:{prod['port']}?type=ws&path={path}&security=none&host={host}#{prod['name']}"
             
-            # رابط SS بصيغة Xray النظيفة
-            # ss://method:pass@ip:port?type=ws&path=/path&host=host#name
-            # ملاحظة: SS WS يحتاج ترميز خاص أحياناً، لكن هذه الصيغة تعمل مع معظم العملاء الحديثين
-            # سنستخدم صيغة Base64 التقليدية
-            base = subprocess.getoutput(f"echo -n 'chacha20-ietf-poly1305:{user_id}' | base64 -w 0")
-            link = f"ss://{base}@{address}:{prod['port']}?type=ws&path={path}&host={host}#{prod['name']}"
+        elif prod['proto'] == "shadowsocks":
+            # صيغة SS + plugin v2ray-plugin (Standard for WS)
+            # SS SIP002 URI Scheme is preferred
+            # ss://base64(method:password)@ip:port?plugin=v2ray-plugin%3Bpath%3D%2Fpath%3Bhost%3Dhost
+            user_pass = f"chacha20-ietf-poly1305:{user_uuid}"
+            user_pass_b64 = subprocess.getoutput(f"echo -n '{user_pass}' | base64 -w 0").strip()
+            plugin_opts = f"v2ray-plugin;path={path};host={host}"
+            # ترميز الخيارات للرابط
+            link = f"ss://{user_pass_b64}@{addr}:{prod['port']}?plugin={plugin_opts}#{prod['name']}"
 
-        else: # VLESS, VMESS, TROJAN
-            entry = {"id": user_id, "email": email}
-            # منع تكرار ID الثابت
-            exists = False
-            for c in target_ib['settings'].get('clients', []):
-                if c['id'] == user_id: exists = True; break
-            if not exists: target_ib['settings']['clients'].append(entry)
+        await query.message.reply_text(f"✅ تم الشراء بنجاح!\n\n`{link}`", parse_mode='Markdown')
 
-            if prod['proto'] == "vless":
-                link = f"vless://{user_id}@{address}:{prod['port']}?type=ws&path={path}&security=none&host={host}&sni={sni}#{prod['name']}"
-            elif prod['proto'] == "vmess":
-                # VMess JSON
-                v_json = {
-                    "v": "2", "ps": prod['name'], "add": address, "port": prod['port'], "id": user_id,
-                    "aid": "0", "net": "ws", "type": "none", "host": host, "path": path, "tls": "none" if prod['port']!="443" else "tls", "sni": sni
-                }
-                link = "vmess://" + subprocess.getoutput(f"echo '{json.dumps(v_json)}' | base64 -w 0")
-            elif prod['proto'] == "trojan":
-                # Trojan WS
-                link = f"trojan://{user_id}@{address}:{prod['port']}?type=ws&path={path}&security=none&host={host}&sni={sni}#{prod['name']}"
+    except Exception as e:
+        await query.message.reply_text(f"❌ حدث خطأ: {str(e)}")
 
-        save_json(FILES['xray'], config)
-        restart_xray()
-        
-        if uid not in users: users[uid] = {"points": 0}
-        users[uid]["points"] -= prod['price']
-        save_json(FILES['users'], users)
-        
-        await query.message.reply_text(f"✅ تم الشراء!\n\n`{link}`", parse_mode='Markdown')
+async def show_shop(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    products = load_json(FILES['prods'])
+    kb = []
+    for pid, p in products.items():
+        kb.append([InlineKeyboardButton(f"{p['name']} | {p['price']}💰", callback_data=f"buy_{pid}")])
+    if not kb: await update.message.reply_text("المتجر فارغ.")
+    else: await update.message.reply_text("اختر:", reply_markup=InlineKeyboardMarkup(kb))
 
-    except Exception as e: await query.message.reply_text(f"Error: {e}")
+# --- هاندلر الإلغاء ---
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("❌ تم الإلغاء", reply_markup=ReplyKeyboardMarkup([["🛒 المنتجات"]], resize_keyboard=True))
+    return ConversationHandler.END
 
 # --- التشغيل ---
 if __name__ == '__main__':
     app = Application.builder().token(TOKEN).build()
     
-    # تعريف الهاندلر الطويل
     conv_handler = ConversationHandler(
         entry_points=[MessageHandler(filters.Regex("^➕ منتج جديد"), add_prod_start)],
         states={
@@ -394,7 +400,7 @@ if __name__ == '__main__':
             QUOTA: [MessageHandler(filters.TEXT, get_quota)],
             DURATION: [MessageHandler(filters.TEXT, get_duration)],
             PRICE: [MessageHandler(filters.TEXT, get_price)],
-        }, fallbacks=[MessageHandler(filters.Regex("^🔙"), lambda u,c: ConversationHandler.END)]
+        }, fallbacks=[MessageHandler(filters.Regex("^🔙"), cancel)]
     )
     
     app.add_handler(CommandHandler("start", start))
@@ -402,5 +408,5 @@ if __name__ == '__main__':
     app.add_handler(MessageHandler(filters.Regex("^🛒 المنتجات|🛍️"), show_shop))
     app.add_handler(CallbackQueryHandler(process_buy, pattern="^buy_"))
     
-    print("✅ البوت المتطور يعمل...")
+    print("✅ البوت يعمل مع الإصلاحات...")
     app.run_polling()
