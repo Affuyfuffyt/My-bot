@@ -1,127 +1,102 @@
 #!/bin/bash
 
-# --- 1. تحديث النظام وتثبيت المتطلبات ---
-echo "🔄 جاري تحديث السيرفر وتثبيت الأدوات الأساسية..."
-apt update && apt upgrade -y
-apt install python3-pip python3-venv curl jq ufw net-tools socat nano -y
+# الألوان للتنسيق
+GREEN='\033[0;32m'
+BLUE='\033[0;34m'
+NC='\033[0m'
 
-# فتح البورتات
+echo -e "${BLUE}🔄 جاري بدء تثبيت الأداة (نظام الـ Fallback)...${NC}"
+
+# 1. تحديث السيرفر وتثبيت المتطلبات
+apt update && apt upgrade -y
+apt install python3-pip python3-venv curl jq ufw socat nano -y
+
+# 2. فتح البورتات
 ufw allow 22/tcp
 ufw allow 80/tcp
-ufw allow 443/tcp
 ufw --force enable
 
-# --- 2. تثبيت Xray Core ---
-echo "💎 جاري تثبيت Xray Core..."
+# 3. تثبيت Xray Core
+echo -e "${BLUE}💎 جاري تثبيت Xray Core...${NC}"
 bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
 
-# تجهيز مجلدات اللوج
+# 4. إنشاء المجلدات اللازمة
+mkdir -p /etc/my-v2ray
 mkdir -p /var/log/xray
-touch /var/log/xray/access.log /var/log/xray/error.log
-chmod 666 /var/log/xray/*.log
 
-# --- 3. تثبيت "الملف الذهبي" لـ Xray (بورت 80 الموحد) ---
-echo "⚙️ برمجة ملف Config الذهبي..."
+# 5. كتابة الملف الذهبي (config.json)
+echo -e "${BLUE}⚙️ برمجة ملف Config الذهبي (بورت 80)...${NC}"
 cat <<EOF > /usr/local/etc/xray/config.json
 {
-    "log": {
-        "access": "/var/log/xray/access.log",
-        "error": "/var/log/xray/error.log",
-        "loglevel": "warning"
-    },
-    "api": {
-        "tag": "api",
-        "services": ["StatsService"]
-    },
-    "stats": {},
-    "policy": {
-        "levels": {
-            "0": {
-                "statsUserUplink": true,
-                "statsUserDownlink": true
-            }
-        },
-        "system": {
-            "statsInboundUplink": true,
-            "statsInboundDownlink": true
-        }
-    },
+    "log": { "loglevel": "warning" },
     "inbounds": [
-        {
-            "listen": "127.0.0.1",
-            "port": 10085,
-            "protocol": "dokodemo-door",
-            "settings": { "address": "127.0.0.1" },
-            "tag": "api"
-        },
         {
             "port": 80,
             "protocol": "vless",
-            "settings": { "clients": [], "decryption": "none" },
-            "streamSettings": { "network": "ws", "wsSettings": { "path": "/vless" } },
-            "tag": "inbound_80_vless"
+            "tag": "vless_main",
+            "settings": {
+                "clients": [],
+                "decryption": "none",
+                "fallbacks": [
+                    { "path": "/trojan", "dest": 10001, "xver": 1 },
+                    { "path": "/vmess", "dest": 10002, "xver": 1 },
+                    { "path": "/ss", "dest": 10003, "xver": 1 }
+                ]
+            },
+            "streamSettings": { "network": "ws", "wsSettings": { "path": "/" } }
         },
         {
-            "port": 80,
-            "protocol": "vmess",
-            "settings": { "clients": [] },
-            "streamSettings": { "network": "ws", "wsSettings": { "path": "/vmess" } },
-            "tag": "inbound_80_vmess"
-        },
-        {
-            "port": 80,
+            "port": 10001,
+            "listen": "127.0.0.1",
             "protocol": "trojan",
+            "tag": "trojan_internal",
             "settings": { "clients": [] },
-            "streamSettings": { "network": "ws", "wsSettings": { "path": "/trojan" } },
-            "tag": "inbound_80_trojan"
+            "streamSettings": { "network": "ws", "wsSettings": { "path": "/trojan" }, "sockopt": { "acceptProxyProtocol": true } }
         },
         {
-            "port": 80,
+            "port": 10002,
+            "listen": "127.0.0.1",
+            "protocol": "vmess",
+            "tag": "vmess_internal",
+            "settings": { "clients": [] },
+            "streamSettings": { "network": "ws", "wsSettings": { "path": "/vmess" }, "sockopt": { "acceptProxyProtocol": true } }
+        },
+        {
+            "port": 10003,
+            "listen": "127.0.0.1",
             "protocol": "shadowsocks",
+            "tag": "ss_internal",
             "settings": { "method": "chacha20-ietf-poly1305", "users": [] },
-            "streamSettings": { "network": "ws", "wsSettings": { "path": "/ss" } },
-            "tag": "inbound_80_ss"
+            "streamSettings": { "network": "ws", "wsSettings": { "path": "/ss" }, "sockopt": { "acceptProxyProtocol": true } }
         }
     ],
-    "outbounds": [
-        { "protocol": "freedom", "tag": "direct" },
-        { "protocol": "blackhole", "tag": "block" }
-    ],
-    "routing": {
-        "rules": [
-            { "inboundTag": ["api"], "outboundTag": "api", "type": "field" }
-        ]
-    }
+    "outbounds": [{ "protocol": "freedom" }]
 }
 EOF
 
-# ريستارت للتأكد من عمل الإعدادات
-systemctl restart xray
-
-# --- 4. إعداد بيئة البوت ---
-echo "🐍 تجهيز ملفات البوت..."
+# 6. تثبيت مكتبة التليجرام
 pip3 install python-telegram-bot --break-system-packages
 
-mkdir -p /etc/my-v2ray
-echo "------------------------------------------------"
-read -p "🤖 أدخل توكن البوت: " BOT_TOKEN
-read -p "👤 أدخل الأيدي الخاص بك: " MY_ID
-echo "------------------------------------------------"
+# 7. طلب بيانات البوت من المستخدم
+echo -e "${GREEN}------------------------------------------------${NC}"
+read -p "🤖 أدخل توكن البوت (Token): " BOT_TOKEN
+read -p "👤 أدخل الأيدي (Your ID): " MY_ID
+echo -e "${GREEN}------------------------------------------------${NC}"
 
-echo "TOKEN=\"$BOT_TOKEN\"" > /etc/my-v2ray/config.py
-echo "ADMIN_ID=$MY_ID" >> /etc/my-v2ray/config.py
+# 8. إنشاء ملف config.py
+cat <<EOF > /etc/my-v2ray/config.py
+TOKEN = "$BOT_TOKEN"
+ADMIN_ID = $MY_ID
+EOF
 
+# 9. إنشاء ملفات البيانات فارغة
 echo "{}" > /etc/my-v2ray/products.json
 echo "{\"$MY_ID\": {\"points\": 1000000}}" > /etc/my-v2ray/users.json
 
-# إنشاء ملفات الكود فارغة ليتم ملؤها لاحقاً
-touch /etc/my-v2ray/core.py
-touch /etc/my-v2ray/monitor.py
-
-# --- 5. خدمات النظام ---
+# 10. إنشاء خدمة النظام (Systemd) لضمان عمل البوت 24 ساعة
 cat <<EOF > /etc/systemd/system/v2ray-bot.service
 [Unit]
-Description=V2Ray Bot Service
+Description=V2Ray Telegram Bot Service
 After=network.target
 
 [Service]
@@ -134,10 +109,11 @@ User=root
 WantedBy=multi-user.target
 EOF
 
+# 11. تشغيل الخدمات
 systemctl daemon-reload
-systemctl enable v2ray-bot
+systemctl restart xray
 systemctl enable xray
+systemctl enable v2ray-bot
 
-echo "✅ تم التثبيت بنجاح!"
-echo "الملف الذهبي تم وضعه تلقائياً في مسار Xray."
-echo "الآن قم بوضع كود core.py في مكانه وشغل الخدمة."
+echo -e "${GREEN}✅ تم تثبيت السيرفر والملف الذهبي بنجاح!${NC}"
+echo -e "${GREEN}🚀 الآن تأكد من رفع ملف core.py إلى مسار /etc/my-v2ray/ وشغل البوت.${NC}"
