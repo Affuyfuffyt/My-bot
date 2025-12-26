@@ -1,146 +1,128 @@
-import os, subprocess, json, sys, uuid, random
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ConversationHandler, CallbackQueryHandler, ContextTypes
+#!/bin/bash
 
-# إعدادات المسارات
-sys.path.append('/etc/my-v2ray')
-try:
-    from config import TOKEN, ADMIN_ID
-except:
-    sys.exit("❌ ملف config.py غير موجود")
+# الألوان للتنسيق
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+BLUE='\033[0;34m'
+NC='\033[0m'
 
-FILES = {
-    "prods": "/etc/my-v2ray/products.json",
-    "users": "/etc/my-v2ray/users.json",
-    "xray": "/usr/local/etc/xray/config.json"
-}
+echo -e "${BLUE}🔄 جاري تنظيف السيرفر وبدء التثبيت النظيف...${NC}"
+# تنظيف أي عمليات قديمة تشغل البورت 80 لضمان عدم حدوث تعارض
+systemctl stop xray 2>/dev/null
+systemctl stop v2ray-bot 2>/dev/null
+fuser -k 80/tcp 2>/dev/null
+lsof -t -i:80 | xargs kill -9 2>/dev/null
 
-(NAME, PROTOCOL, PRICE) = range(3)
+# --- 1. تحديث النظام وتثبيت المتطلبات ---
+echo -e "${GREEN}📦 تحديث السيرفر وتثبيت الأدوات...${NC}"
+apt update && apt upgrade -y
+apt install python3-pip python3-venv curl jq ufw net-tools socat nano wget -y
 
-def load_json(p):
-    try:
-        with open(p, 'r') as f: return json.load(f)
-    except: return {}
+# فتح البورتات الضرورية
+ufw allow 22/tcp
+ufw allow 80/tcp
+ufw --force enable
 
-def save_json(p, d):
-    with open(p, 'w') as f: json.dump(d, f, indent=4)
+# --- 2. تثبيت Xray Core ---
+echo -e "${GREEN}💎 جاري تثبيت Xray Core الرسمي...${NC}"
+bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
 
-def restart_xray():
-    os.system("systemctl restart xray")
+# تجهيز مجلدات اللوج
+mkdir -p /var/log/xray
+touch /var/log/xray/access.log /var/log/xray/error.log
+chmod 666 /var/log/xray/*.log
 
-# --- الأوامر الأساسية ---
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if user_id == int(ADMIN_ID):
-        kb = [["➕ إضافة منتج", "🛒 المتجر"], ["🔄 ريستارت Xray"]]
-        await update.message.reply_text("🛠️ لوحة التحكم (نظام Fallback):", reply_markup=ReplyKeyboardMarkup(kb, resize_keyboard=True))
-    else:
-        await update.message.reply_text("👋 مرحباً بك في بوت البيع.", reply_markup=ReplyKeyboardMarkup([["🛒 المتجر"]], resize_keyboard=True))
-
-# --- إضافة المنتج ---
-async def add_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("1️⃣ اسم المنتج (مثلاً: تروجان سريع):")
-    return NAME
-
-async def get_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data['p_name'] = update.message.text
-    kb = [["vless", "trojan"], ["vmess", "shadowsocks"]]
-    await update.message.reply_text("2️⃣ اختر نوع البروتوكول:", reply_markup=ReplyKeyboardMarkup(kb, one_time_keyboard=True))
-    return PROTOCOL
-
-async def get_proto(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data['p_proto'] = update.message.text
-    await update.message.reply_text("3️⃣ السعر بالنقاط:")
-    return PRICE
-
-async def get_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        price = int(update.message.text)
-        prods = load_json(FILES['prods'])
-        pid = str(uuid.uuid4())[:8]
-        
-        # تعيين المسار تلقائياً بناءً على النوع
-        proto = context.user_data['p_proto']
-        path = "/" if proto == "vless" else f"/{proto}"
-        if proto == "shadowsocks": path = "/ss"
-
-        prods[pid] = {
-            "name": context.user_data['p_name'],
-            "proto": proto,
-            "price": price,
-            "path": path
+# --- 3. تثبيت "الملف الذهبي" بنظام Fallback (لعمل كل البروتوكولات على 80) ---
+echo -e "${GREEN}⚙️ برمجة ملف Config الذهبي (بورت 80 الموحد)...${NC}"
+cat <<EOF > /usr/local/etc/xray/config.json
+{
+    "log": {
+        "access": "/var/log/xray/access.log",
+        "error": "/var/log/xray/error.log",
+        "loglevel": "warning"
+    },
+    "inbounds": [
+        {
+            "port": 80,
+            "protocol": "vless",
+            "tag": "vless_main",
+            "settings": {
+                "clients": [],
+                "decryption": "none",
+                "fallbacks": [
+                    { "path": "/vmess", "dest": 10002, "xver": 1 },
+                    { "path": "/trojan", "dest": 10001, "xver": 1 },
+                    { "path": "/ss", "dest": 10003, "xver": 1 }
+                ]
+            },
+            "streamSettings": { "network": "ws", "wsSettings": { "path": "/" } }
+        },
+        {
+            "port": 10001, "listen": "127.0.0.1", "protocol": "trojan", "tag": "inbound_80_trojan",
+            "settings": { "clients": [] },
+            "streamSettings": { "network": "ws", "wsSettings": { "path": "/trojan" }, "sockopt": { "acceptProxyProtocol": true } }
+        },
+        {
+            "port": 10002, "listen": "127.0.0.1", "protocol": "vmess", "tag": "inbound_80_vmess",
+            "settings": { "clients": [] },
+            "streamSettings": { "network": "ws", "wsSettings": { "path": "/vmess" }, "sockopt": { "acceptProxyProtocol": true } }
+        },
+        {
+            "port": 10003, "listen": "127.0.0.1", "protocol": "shadowsocks", "tag": "inbound_80_ss",
+            "settings": { "method": "chacha20-ietf-poly1305", "users": [] },
+            "streamSettings": { "network": "ws", "wsSettings": { "path": "/ss" }, "sockopt": { "acceptProxyProtocol": true } }
         }
-        save_json(FILES['prods'], prods)
-        await update.message.reply_text(f"✅ تم حفظ {proto} على بورت 80 بنجاح!", reply_markup=ReplyKeyboardMarkup([["🛒 المتجر"]], resize_keyboard=True))
-        return ConversationHandler.END
-    except: return PRICE
+    ],
+    "outbounds": [{ "protocol": "freedom", "tag": "direct" }]
+}
+EOF
 
-# --- الشراء وتوليد الروابط ---
-async def shop(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    prods = load_json(FILES['prods'])
-    if not prods:
-        await update.message.reply_text("المتجر فارغ حالياً.")
-        return
-    for pid, p in prods.items():
-        kb = [[InlineKeyboardButton(f"شراء ({p['price']}💰)", callback_data=f"buy_{pid}")]]
-        await update.message.reply_text(f"📦 {p['name']}\n🚀 {p['proto']} | 🔌 Port 80", reply_markup=InlineKeyboardMarkup(kb))
+systemctl restart xray
 
-async def process_buy(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    pid = query.data.split("_")[1]
-    p = load_json(FILES['prods']).get(pid)
-    uid = str(query.from_user.id)
-    
-    f_uuid = str(uuid.uuid4())
-    f_addr = subprocess.getoutput("curl -s ifconfig.me")
-    
-    # تحديد الـ Tag الصحيح في Xray
-    tag_map = {"vless": "vless_main", "trojan": "trojan_internal", "vmess": "vmess_internal", "shadowsocks": "ss_internal"}
-    target_tag = tag_map.get(p['proto'])
+# --- 4. إعداد بيئة البوت ---
+echo -e "${GREEN}🐍 تجهيز بيئة البايثون...${NC}"
+pip3 install python-telegram-bot --break-system-packages
 
-    config = load_json(FILES['xray'])
-    for ib in config['inbounds']:
-        if ib.get('tag') == target_tag:
-            email = f"u_{uid}_{random.randint(100,999)}"
-            if p['proto'] == "shadowsocks":
-                ib['settings']['users'].append({"password": f_uuid, "email": email})
-            else:
-                key = "password" if p['proto'] == "trojan" else "id"
-                ib['settings']['clients'].append({key: f_uuid, "email": email})
-            break
-            
-    save_json(FILES['xray'], config)
-    restart_xray()
-    
-    # توليد الرابط النهائي
-    link = ""
-    name = p['name'].replace(" ", "_")
-    if p['proto'] == "vless":
-        link = f"vless://{f_uuid}@{f_addr}:80?type=ws&security=none&path=/#{name}"
-    elif p['proto'] == "trojan":
-        link = f"trojan://{f_uuid}@{f_addr}:80?type=ws&security=none&path=/trojan#{name}"
-    elif p['proto'] == "vmess":
-        vj = {"v":"2","ps":name,"add":f_addr,"port":"80","id":f_uuid,"aid":"0","net":"ws","path":"/vmess","tls":"none"}
-        link = "vmess://" + subprocess.getoutput(f"echo '{json.dumps(vj)}' | base64 -w 0")
-    elif p['proto'] == "shadowsocks":
-        raw = f"chacha20-ietf-poly1305:{f_uuid}"
-        b64 = subprocess.getoutput(f"echo -n '{raw}' | base64 -w 0")
-        link = f"ss://{b64}@{f_addr}:80?plugin=v2ray-plugin%3Bpath%3D%2Fss%3Bhost%3D#{name}"
+mkdir -p /etc/my-v2ray
+echo "------------------------------------------------"
+read -p "🤖 أدخل توكن البوت: " BOT_TOKEN
+read -p "👤 أدخل الأيدي (ID) الخاص بك: " MY_ID
+echo "------------------------------------------------"
 
-    await query.message.reply_text(f"✅ تم استلام طلبك:\n\n`{link}`", parse_mode='Markdown')
+echo "TOKEN=\"$BOT_TOKEN\"" > /etc/my-v2ray/config.py
+echo "ADMIN_ID=$MY_ID" >> /etc/my-v2ray/config.py
 
-def main():
-    app = Application.builder().token(TOKEN).build()
-    conv = ConversationHandler(
-        entry_points=[MessageHandler(filters.Regex("^➕ إضافة منتج"), add_start)],
-        states={NAME: [MessageHandler(filters.TEXT, get_name)], PROTOCOL: [MessageHandler(filters.TEXT, get_proto)], PRICE: [MessageHandler(filters.TEXT, get_price)]},
-        fallbacks=[]
-    )
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(conv)
-    app.add_handler(MessageHandler(filters.Regex("^🛒 المتجر"), shop))
-    app.add_handler(CallbackQueryHandler(process_buy, pattern="^buy_"))
-    app.add_handler(MessageHandler(filters.Regex("^🔄 ريستارت Xray"), lambda u,c: (restart_xray(), u.message.reply_text("✅ تم!"))))
-    app.run_polling()
+echo "{}" > /etc/my-v2ray/products.json
+echo "{\"$MY_ID\": {\"points\": 1000000}}" > /etc/my-v2ray/users.json
 
-if __name__ == '__main__': main()
+# --- 🟢 جلب كود core.py من GitHub الخاص بك تلقائياً ---
+echo -e "${GREEN}📥 جاري سحب كود البوت من GitHub...${NC}"
+GITHUB_LINK="https://raw.githubusercontent.com/Affuyfuffyt/My-bot/refs/heads/main/core.py"
+wget -O /etc/my-v2ray/core.py "$GITHUB_LINK"
+
+# --- 5. إنشاء خدمة النظام للبوت (للبقاء شغال 24 ساعة) ---
+cat <<EOF > /etc/systemd/system/v2ray-bot.service
+[Unit]
+Description=V2Ray Bot Service
+After=network.target
+
+[Service]
+ExecStart=/usr/bin/python3 /etc/my-v2ray/core.py
+WorkingDirectory=/etc/my-v2ray
+Restart=always
+User=root
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+echo -e "${GREEN}🔄 تشغيل الخدمات...${NC}"
+systemctl daemon-reload
+systemctl enable v2ray-bot
+systemctl start v2ray-bot
+systemctl enable xray
+
+echo -e "${BLUE}==============================================${NC}"
+echo -e "${GREEN}✅ تم التثبيت بنجاح!${NC}"
+echo -e "${GREEN}🚀 البوت تم سحبه من مستودعك وهو يعمل الآن.${NC}"
+echo -e "${BLUE}==============================================${NC}"
