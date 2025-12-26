@@ -1,31 +1,28 @@
 #!/bin/bash
 
-# الألوان للتنسيق
+# ألوان للتنسيق
+RED='\033[0;31m'
 GREEN='\033[0;32m'
-BLUE='\033[0;34m'
 NC='\033[0m'
 
-echo -e "${BLUE}🔄 جاري بدء تثبيت الأداة (نظام الـ Fallback)...${NC}"
+echo -e "${RED}🧹 جاري تنظيف السيرفر من أي نسخة قديمة...${NC}"
+systemctl stop xray 2>/dev/null
+systemctl stop v2ray-bot 2>/dev/null
+fuser -k 80/tcp 2>/dev/null # قتل أي عملية تشغل بورت 80
 
-# 1. تحديث السيرفر وتثبيت المتطلبات
-apt update && apt upgrade -y
-apt install python3-pip python3-venv curl jq ufw socat nano -y
+# 1. تثبيت المتطلبات
+echo -e "${GREEN}📦 تثبيت التحديثات والمكتبات...${NC}"
+apt update && apt install python3-pip curl jq ufw socat -y
 
-# 2. فتح البورتات
-ufw allow 22/tcp
-ufw allow 80/tcp
-ufw --force enable
-
-# 3. تثبيت Xray Core
-echo -e "${BLUE}💎 جاري تثبيت Xray Core...${NC}"
+# 2. تثبيت Xray Core الرسمي
 bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
 
-# 4. إنشاء المجلدات اللازمة
+# 3. إنشاء المجلدات
 mkdir -p /etc/my-v2ray
-mkdir -p /var/log/xray
+mkdir -p /usr/local/etc/xray
 
-# 5. كتابة الملف الذهبي (config.json)
-echo -e "${BLUE}⚙️ برمجة ملف Config الذهبي (بورت 80)...${NC}"
+# 4. كتابة ملف Config الذهبي (Fallback System)
+# هذا الكود يوزع الحركة: VLESS على / ، Trojan على /trojan ، Vmess على /vmess
 cat <<EOF > /usr/local/etc/xray/config.json
 {
     "log": { "loglevel": "warning" },
@@ -39,8 +36,7 @@ cat <<EOF > /usr/local/etc/xray/config.json
                 "decryption": "none",
                 "fallbacks": [
                     { "path": "/trojan", "dest": 10001, "xver": 1 },
-                    { "path": "/vmess", "dest": 10002, "xver": 1 },
-                    { "path": "/ss", "dest": 10003, "xver": 1 }
+                    { "path": "/vmess", "dest": 10002, "xver": 1 }
                 ]
             },
             "streamSettings": { "network": "ws", "wsSettings": { "path": "/" } }
@@ -60,60 +56,29 @@ cat <<EOF > /usr/local/etc/xray/config.json
             "tag": "vmess_internal",
             "settings": { "clients": [] },
             "streamSettings": { "network": "ws", "wsSettings": { "path": "/vmess" }, "sockopt": { "acceptProxyProtocol": true } }
-        },
-        {
-            "port": 10003,
-            "listen": "127.0.0.1",
-            "protocol": "shadowsocks",
-            "tag": "ss_internal",
-            "settings": { "method": "chacha20-ietf-poly1305", "users": [] },
-            "streamSettings": { "network": "ws", "wsSettings": { "path": "/ss" }, "sockopt": { "acceptProxyProtocol": true } }
         }
     ],
     "outbounds": [{ "protocol": "freedom" }]
 }
 EOF
 
-# 6. تثبيت مكتبة التليجرام
+# 5. طلب بيانات البوت
+echo -e "${GREEN}🤖 إعداد بيانات البوت...${NC}"
+read -p "Token: " BOT_TOKEN
+read -p "Admin ID: " ADMIN_ID
+
+echo "TOKEN = \"$BOT_TOKEN\"" > /etc/my-v2ray/config.py
+echo "ADMIN_ID = $ADMIN_ID" >> /etc/my-v2ray/config.py
+echo "{}" > /etc/my-v2ray/products.json
+echo "{\"$ADMIN_ID\": {\"points\": 1000000}}" > /etc/my-v2ray/users.json
+
+# 6. تثبيت المكتبات
 pip3 install python-telegram-bot --break-system-packages
 
-# 7. طلب بيانات البوت من المستخدم
-echo -e "${GREEN}------------------------------------------------${NC}"
-read -p "🤖 أدخل توكن البوت (Token): " BOT_TOKEN
-read -p "👤 أدخل الأيدي (Your ID): " MY_ID
-echo -e "${GREEN}------------------------------------------------${NC}"
-
-# 8. إنشاء ملف config.py
-cat <<EOF > /etc/my-v2ray/config.py
-TOKEN = "$BOT_TOKEN"
-ADMIN_ID = $MY_ID
-EOF
-
-# 9. إنشاء ملفات البيانات فارغة
-echo "{}" > /etc/my-v2ray/products.json
-echo "{\"$MY_ID\": {\"points\": 1000000}}" > /etc/my-v2ray/users.json
-
-# 10. إنشاء خدمة النظام (Systemd) لضمان عمل البوت 24 ساعة
-cat <<EOF > /etc/systemd/system/v2ray-bot.service
-[Unit]
-Description=V2Ray Telegram Bot Service
-After=network.target
-
-[Service]
-ExecStart=/usr/bin/python3 /etc/my-v2ray/core.py
-WorkingDirectory=/etc/my-v2ray
-Restart=always
-User=root
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-# 11. تشغيل الخدمات
+# 7. تشغيل الخدمات
 systemctl daemon-reload
 systemctl restart xray
 systemctl enable xray
-systemctl enable v2ray-bot
 
-echo -e "${GREEN}✅ تم تثبيت السيرفر والملف الذهبي بنجاح!${NC}"
-echo -e "${GREEN}🚀 الآن تأكد من رفع ملف core.py إلى مسار /etc/my-v2ray/ وشغل البوت.${NC}"
+echo -e "${GREEN}✅ تم التنظيف والتثبيت بنجاح!${NC}"
+echo -e "${GREEN}الآن ارفع ملف core.py وشغل خدمة البوت.${NC}"
